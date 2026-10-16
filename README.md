@@ -12,7 +12,7 @@ The VM has these limits:
 - DNS lookups use DNS over TLS (port 853). Some networks block plain DNS (port 53) to public resolvers.
 - If a hardening step fails at boot, the VM shuts down.
 
-The agent can run containers with rootless Podman, and it can use the tools in the `tools` directory, such as `uv`, `gcloud`, `opencode`, and `claude`.
+The agent can run containers with rootless Podman, and it can use the tools in the `tools` directory, such as `uv`, `gcloud`, `opencode`, `claude`, and `codex`.
 
 ## Files
 
@@ -124,8 +124,9 @@ The base VM installs the tools in the `tools` directory. Each tool has one scrip
 | `tools/opencode.sh` | `opencode`, the AI coding agent          | `/usr/local/bin` |
 | `tools/docker-cli.sh` | `docker`, the Docker CLI for the Podman socket | `/usr/local/bin` |
 | `tools/claude.sh` | `claude`, Claude Code, the AI coding agent | `/usr/local/bin` |
+| `tools/codex.sh`  | `codex`, the AI coding agent from OpenAI   | `/usr/local/bin`, with the files in `/opt/codex` |
 
-The tools in `/usr/local/bin` belong to root, so they cannot update themselves. For example, Claude Code cannot install a new version. To get new versions, rebuild the base VM. For the steps, see "Update the VM".
+The tools in `/usr/local/bin` belong to root, so they cannot update themselves. For example, Claude Code and Codex cannot install a new version. To get new versions, rebuild the base VM. For the steps, see "Update the VM".
 
 The tool list is not in `sandbox.yaml`. When `make base` builds the base VM, it writes `.build/sandbox-base.yaml`. That file uses `sandbox.yaml` as its Lima base template and adds each `tools/*.sh` script as a provision script. Make writes the file again at each build, so git ignores it.
 

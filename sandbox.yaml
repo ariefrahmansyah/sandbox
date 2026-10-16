@@ -1,0 +1,136 @@
+# Disposable sandbox for running an AI coding agent unattended.
+# Threat model: assume code inside the VM is hostile. It must not reach host
+# files, host credentials, the host itself, or the LAN, and must not get root.
+#
+# Workflow (see Makefile):
+#   1. Build a base VM once. It installs packages, then stops. Never use it.
+#   2. For each task, clone the base into a fresh VM, run the agent, delete it.
+#   3. To update packages, rebuild the base.
+# Copy in scoped, revocable tokens only. Review the agent's pushed branch on the
+# host; never pull artifacts back unreviewed.
+#
+# Root inside the VM is available only from the host: change this file and
+# rebuild the base.
+
+minimumLimaVersion: 2.0.0
+base:
+  - template:_images/ubuntu-26.04
+vmType: vz
+cpus: 2
+memory: "4GiB"
+disk: "20GiB"
+
+# No mounts, no port forwards, no guest agent, no containerd.
+plain: true
+nestedVirtualization: false
+vmOpts:
+  vz:
+    rosetta:
+      enabled: false
+
+ssh:
+  forwardAgent: false
+  loadDotSSHPubKeys: false
+
+# Lima sets a random sudo password and writes it to ~/password, which the
+# agent could read. The provision script below prevents that file from being
+# created and locks the password, so the user has no way to sudo.
+user:
+  passwordlessSudo: false
+
+# Upgrades run once, in the provision script below. Lima's own upgrade step
+# would run on every boot, because Lima changes the instance ID on each boot.
+upgradePackages: false
+propagateProxyEnv: false
+hostResolver:
+  enabled: false
+dns:
+  - 1.1.1.1
+  - 9.9.9.9
+
+provision:
+  # Runs as root on every boot, before Lima's password-generation step.
+  - mode: system
+    script: |
+      #!/bin/bash
+      set -eux -o pipefail
+      # Fail closed: if any step fails, don't leave a half-hardened VM running.
+      # The message goes to the serial console, so it shows in serialv.log on the
+      # host; the user can't read the guest's logs without root.
+      trap 'line=$LINENO cmd=$BASH_COMMAND; { echo "sandbox: hardening failed at line $line: $cmd, powering off"; tail -n 20 /var/log/cloud-init-output.log; } | tee /dev/hvc0 >&2; systemctl poweroff' ERR
+
+      # --- No root for the user ---------------------------------------------
+      # Lima only generates ~/password when this marker is absent. Recreating it
+      # on every boot also defeats the agent deleting it and waiting for a reboot.
+      touch "{{.Home}}/.lima-password-set"
+      rm -f "{{.Home}}/password"
+      passwd -l "{{.User}}"
+      # Drop membership in root-equivalent groups, if any.
+      for g in sudo admin lxd docker disk; do
+        gpasswd -d "{{.User}}" "$g" 2>/dev/null || true
+      done
+
+      # --- DNS over TLS ---------------------------------------------------------
+      # Some networks block plain DNS (port 53) to public resolvers, which makes
+      # every lookup time out. Port 853 is usually open, and it is encrypted.
+      mkdir -p /etc/systemd/resolved.conf.d
+      cat >/etc/systemd/resolved.conf.d/90-sandbox-dot.conf <<'EOF'
+      [Resolve]
+      DNS=1.1.1.1#cloudflare-dns.com 9.9.9.9#dns.quad9.net
+      DNSOverTLS=yes
+      Domains=~.
+      EOF
+      systemctl restart systemd-resolved
+
+      # --- Egress firewall ----------------------------------------------------
+      # Internet is allowed; the host (Lima's gateway is 192.168.5.2), the LAN,
+      # link-local (cloud metadata), CGNAT (Tailscale), and multicast are not.
+      # Replies to inbound connections (`limactl shell` over SSH) still work.
+      export DEBIAN_FRONTEND=noninteractive
+      command -v nft >/dev/null || { apt-get update; apt-get install -y nftables; }
+      cat >/etc/nftables.conf <<'EOF'
+      #!/usr/sbin/nft -f
+      flush ruleset
+
+      table inet sandbox {
+        set blocked_v4 {
+          type ipv4_addr; flags interval
+          elements = {
+            10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16,
+            100.64.0.0/10, 169.254.0.0/16, 224.0.0.0/4
+          }
+        }
+        set blocked_v6 {
+          type ipv6_addr; flags interval
+          elements = { fc00::/7, fe80::/10, ff00::/8 }
+        }
+
+        chain output {
+          type filter hook output priority filter; policy accept;
+          oifname "lo" accept
+          ct state established,related accept
+          udp sport 68 udp dport 67 accept      # DHCP lease renewal
+          meta l4proto ipv6-icmp accept         # IPv6 neighbor discovery
+          ip daddr @blocked_v4 limit rate 10/minute log prefix "sandbox-egress-block: "
+          ip daddr @blocked_v4 counter reject with icmpx type admin-prohibited
+          ip6 daddr @blocked_v6 counter reject with icmpx type admin-prohibited
+        }
+      }
+      EOF
+      nft -f /etc/nftables.conf
+      nft list table inet sandbox >/dev/null
+      systemctl enable nftables
+
+      # --- Packages (first boot of the base VM only) -------------------------
+      # The agent can't apt-get install, so preinstall what it needs here.
+      # The marker is root-owned, so the agent can't reset it. Clones inherit it
+      # and skip this step. To change packages, rebuild the base VM.
+      if [ ! -f /var/lib/sandbox/packages-done ]; then
+        apt-get update
+        apt-get upgrade -y
+        apt-get install -y --no-install-recommends \
+          git curl ca-certificates build-essential jq ripgrep
+        apt-get clean
+        mkdir -p /var/lib/sandbox
+        touch /var/lib/sandbox/packages-done
+      fi

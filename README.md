@@ -99,6 +99,16 @@ The VM has rootless Podman and the `podman-docker` package. The agent can use `d
 
 The VM does not have the Docker daemon. Access to the Docker daemon gives root, and its container traffic does not go through the firewall rules for the VM. Do not add the `docker.io` or `docker-ce` packages to `provision.sh` or to a tool script.
 
+Some tools need more than the Podman CLI. Some tools connect to a Docker socket. Examples are Docker Compose, Testcontainers, and the Docker SDKs. Other tools read fields that only the Docker CLI has, such as `ServerVersion` in `docker info`. The Podman CLI does not have these fields, so these tools report that the Docker daemon is not reachable.
+
+For these tools, `tools/docker-cli.sh` does three things:
+
+- It installs the Docker CLI in `/usr/local/bin/docker`. It does not install the Docker daemon. `/usr/local/bin` comes before `/usr/bin` in `PATH`, so `docker` runs the Docker CLI and not the `podman-docker` shim.
+- It starts the Podman API socket for the user at login. The socket is `/run/user/<uid>/podman/podman.sock`.
+- It sets `DOCKER_HOST` to the socket in `/etc/profile.d/docker-host.sh`.
+
+The Docker CLI sends each command to Podman through the socket. The socket belongs to the VM user and not to root, so it does not give root. Containers that start through the socket are rootless, and the firewall applies to them. To make sure that the socket works, run `docker info`. The server version is the Podman version.
+
 Rootless containers run in a user namespace. The root user in a container is the normal VM user outside the container. Container network traffic goes through `pasta` as the VM user, so the firewall applies to it. Inside a container, a blocked connection fails with "Connection refused" and not "No route to host".
 
 Images use disk space in the VM. The VM disk is 20 GiB. To make it larger, change `disk` in `sandbox.yaml` and rebuild the base VM.
@@ -112,6 +122,7 @@ The base VM installs the tools in the `tools` directory. Each tool has one scrip
 | `tools/uv.sh`     | `uv` and `uvx`, the Python project manager | `/usr/local/bin` |
 | `tools/gcloud.sh` | `gcloud`, the Google Cloud CLI             | `/usr/bin` (apt) |
 | `tools/opencode.sh` | `opencode`, the AI coding agent          | `/usr/local/bin` |
+| `tools/docker-cli.sh` | `docker`, the Docker CLI for the Podman socket | `/usr/local/bin` |
 
 The tool list is not in `sandbox.yaml`. When `make base` builds the base VM, it writes `.build/sandbox-base.yaml`. That file uses `sandbox.yaml` as its Lima base template and adds each `tools/*.sh` script as a provision script. Make writes the file again at each build, so git ignores it.
 

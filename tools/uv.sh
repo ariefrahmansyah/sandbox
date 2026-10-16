@@ -10,3 +10,7 @@ command -v uv >/dev/null && exit 0
 
 curl -fsSL https://astral.sh/uv/install.sh |
   env UV_INSTALL_DIR=/usr/local/bin UV_NO_MODIFY_PATH=1 sh
+
+# `uv tool install` puts programs in ~/.local/bin. Ubuntu adds that directory
+# to PATH at login only when the directory exists, so create it for the user.
+runuser -u "{{.User}}" -- mkdir -p "{{.Home}}/.local/bin"
